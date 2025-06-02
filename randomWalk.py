@@ -7,6 +7,7 @@ import networkx as nx
 from networkx import DiGraph
 from networkx.drawing.nx_agraph import graphviz_layout
 import matplotlib.pyplot as plt
+from collections import deque 
 
 def uci_to_algebraic(uci_move, board):
     move = board.parse_uci(str(uci_move))
@@ -74,9 +75,7 @@ def randomWalk(games, n=pow(10, 5)):
 
 		pi[path] = pi.get(path, 0) + 1
 		
-		print(l)
-		#print()
-		#print(path)
+		print(path)
 		
 		history.append(current)
 		current = [g.next() for g in current if g.next() and g.next().move == move]
@@ -84,33 +83,97 @@ def randomWalk(games, n=pow(10, 5)):
 
 	return pi
 
-def buildGraphFromCount(pi):
-	G = DiGraph()
+def randomWalk2(games, n=pow(10, 5)):
+	# Setup variables
+	board = Board()
+	current = games
+	moves = []
+	history = []
+	path = ""
+	pi = {}
+	for _ in range(n):
+		nGames = len(current)
 
-	total_visits = float(sum(pi.values()))
-	G.add_node("root", weight=0.0)
+		move = random.choice(current).next()
+		move = move.move if move else move
+		moves.append(move)
 
-	labels = {}
-	for path, count in pi.items():
-		labels[path] = path.split()[-1]
-		print(path, " - ",count)
-		prob = count / total_visits
+		moveStart = not move or nGames==1
+		moveUp = moves and random.uniform(0, 1) < 1/(nGames+1)
 
-		if path not in G:
-			G.add_node(path, weight=prob)
+		if moveStart:
+			board = Board()
+			current = games
+			moves = []
+			history = []
+			path = ""
+			continue
 
-		tokens = path.split()
-		if len(tokens) == 1:
-			parent = "root"
-		else:
-			parent = " ".join(tokens[:-1])
+		if moveUp:
+			if history:
+				moves.pop()
+				board.pop()
+				current = history.pop()
+				tmp = path.split()
+				tmp.pop()
+				path = " ".join(tmp)
+			continue
+		
+		path += f" {uci_to_algebraic(move, board)}"
+		path = path.strip()
 
-		if parent not in G:
-			G.add_node(parent, weight=0.0)
+		pi[path] = pi.get(path, 0) + 1
+		
+		history.append(current)
+		current = [g.next() for g in current if g.next() and g.next().move == move]
+		board.push(move)
 
-		G.add_edge(parent, path)
+	return pi
 
-	return (G, labels)
+def buildGraphFromCount(pi, limitDepth=-1):
+    # Filter paths by depth limit if specified
+    if limitDepth != -1:
+        remove = [path for path in pi if len(path.split()) > limitDepth]
+        for path in remove:
+            pi.pop(path, None)
+    
+    total_visits = float(sum(pi.values()))
+    
+    # Build a mapping of parent nodes to their children
+    children_map = {}
+    children_map["root"] = []  # Initialize root's children
+    
+    for path, count in pi.items():
+        tokens = path.split()
+        parent = "root" if len(tokens) == 1 else " ".join(tokens[:-1])
+        
+        if parent not in children_map:
+            children_map[parent] = []
+        children_map[parent].append((path, count))
+    
+    # Sort children of each parent by count (descending)
+    for parent in children_map:
+        children_map[parent].sort(key=lambda x: x[1], reverse=True)
+    
+    # Build graph with BFS, adding children in sorted order
+    G = DiGraph()
+    G.add_node("root", weight=0.0)
+    
+    queue = deque(["root"])
+    while queue:
+        node = queue.popleft()
+        if node in children_map:
+            for child_path, count in children_map[node]:
+                # Calculate weight for child node
+                prob = count / total_visits if child_path in pi else 0.0
+                G.add_node(child_path, weight=prob)
+                G.add_edge(node, child_path)
+                queue.append(child_path)
+    
+    # Create labels for leaf nodes (last move only)
+    labels = {path: path.split()[-1] for path in pi}
+    
+    return (G, labels)
 
 def draw_chess_trees_grid(
 	G_list,
@@ -215,15 +278,15 @@ def draw_chess_trees_grid(
 	plt.show()
 
 #white, black = fromAPI()
-games = fromLocalFile(max=10)
+games = fromLocalFile(max=1000)
 
 graphs = []
 labels = []
 for i in range(9):
-	pi = randomWalk(games, 100000)
-	graph, label = buildGraphFromCount(pi)
+	pi = randomWalk2(games, 1000)
+	graph, label = buildGraphFromCount(pi, 3)
 	graphs.append(graph)
 	labels.append(label)
-print(graphs)
+	print(graph)
 
 draw_chess_trees_grid(graphs, labels, ncols=3)
