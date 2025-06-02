@@ -1,4 +1,5 @@
 import random
+import math
 from chess import Board
 from stockfish import Stockfish
 from getGames import fromAPI, fromLocalFile
@@ -83,7 +84,6 @@ def randomWalk(games, n=pow(10, 5)):
 
 	return pi
 
-
 def buildGraphFromCount(pi):
 	G = DiGraph()
 
@@ -112,93 +112,118 @@ def buildGraphFromCount(pi):
 
 	return (G, labels)
 
-def draw_chess_tree(G, labels, scalar=10000, cmap=plt.cm.Reds, figsize=(12, 8)):
-	"""
-	Draws a directed chess‐tree where:
-	- G is a NetworkX DiGraph. Each node in G must have a "weight" attribute (a float in [0,1]).
-	- labels is a dict: { node_key_in_G : string_to_display }.
-		Typically labels[node] = last‐move token, e.g. "e4".
-	- scalar is a multiplier for node_size (so weights * scalar → actual circle sizes).
-	- cmap is the Matplotlib colormap used to shade nodes by weight.
-	- figsize controls the overall figure size.
+def draw_chess_trees_grid(
+	G_list,
+	labels_list,
+	draw_labels=False,
+	scalar=5000,
+	cmap=plt.cm.Reds,
+	figsize=(12, 8),
+	ncols=2,
+):
+	if len(G_list) != len(labels_list):
+		raise ValueError("G_list and labels_list must have the same length.")
 
-	Usage:
-		# Suppose G was returned by randomWalkGraph(...).
-		# Build a labels dict that extracts only the last move:
-		labels = {}
-		for node in G.nodes():
-			if node == "":
-				labels[node] = "root"
-			else:
-				labels[node] = node.split()[-1]
+	n_plots = len(G_list)
+	ncols = max(1, ncols)
+	nrows = math.ceil(n_plots / ncols)
 
-		draw_chess_tree(G, labels)
-	"""
-	weights = nx.get_node_attributes(G, "weight")
-	if not weights:
-		raise ValueError("Each node in G must have a 'weight' attribute.")
+	fig, axes = plt.subplots(nrows=nrows, ncols=ncols, figsize=figsize)
+	# Flatten axes array for easy indexing, even if nrows or ncols is 1
+	if isinstance(axes, plt.Axes):
+		axes = [axes]
+	else:
+		axes = axes.flatten()
 
-	# 2) Compute node sizes and colors in the same order as G.nodes()
-	node_sizes  = [weights.get(node, 0.0) * scalar for node in G.nodes()]
-	node_colors = [weights.get(node, 0.0)       for node in G.nodes()]
+	# Compute global vmin, vmax across all graphs so colors are comparable
+	all_weights = []
+	for G in G_list:
+		w = nx.get_node_attributes(G, "weight")
+		if not w:
+			raise ValueError("Each graph must have a 'weight' attribute on its nodes.")
+		all_weights.extend(w.values())
+	global_vmin = min(all_weights)
+	global_vmax = max(all_weights)
 
-	# 3) Compute a layout. Prefer Graphviz "dot" for a tidy top‐down tree.
-	pos = graphviz_layout(G, prog="dot")
-	
+	for idx, (G, labels) in enumerate(zip(G_list, labels_list)):
+		ax = axes[idx]
+		weights = nx.get_node_attributes(G, "weight")
 
-	# 4) Begin drawing
-	plt.figure(figsize=figsize)
+		# Node sizes and colors (in the same order as G.nodes())
+		node_sizes  = [weights.get(node, 0.0) * scalar for node in G.nodes()]
+		node_colors = [weights.get(node, 0.0)       for node in G.nodes()]
 
-	# 4a) Draw nodes (size & color by weight)
-	nx.draw_networkx_nodes(
-		G,
-		pos,
-		node_size=node_sizes,
-		node_color=node_colors,
-		cmap=cmap,
-		alpha=0.8,
-		linewidths=0.4,
-		edgecolors="black"
-	)
+		# Compute positions
+		pos = graphviz_layout(G, prog="dot")
 
-	# 4b) Draw edges (thin/faint arrows)
-	nx.draw_networkx_edges(
-		G,
-		pos,
-		arrows=True,
-		arrowstyle="-|>",
-		alpha=0.3,
-		width=0.7
-	)
+		# Draw nodes
+		nx.draw_networkx_nodes(
+			G,
+			pos,
+			node_size=node_sizes,
+			node_color=node_colors,
+			cmap=cmap,
+			vmin=global_vmin,
+			vmax=global_vmax,
+			alpha=0.8,
+			linewidths=0.4,
+			edgecolors="black",
+			ax=ax
+		)
 
-	# 4c) Draw labels using the provided labels dict
-	nx.draw_networkx_labels(
-		G,
-		pos,
-		labels=labels,
-		font_size=8,
-		font_color="black",
-		verticalalignment="center",
-		horizontalalignment="center"
-	)
+		# Draw edges
+		nx.draw_networkx_edges(
+			G,
+			pos,
+			arrows=True,
+			arrowstyle="-|>",
+			alpha=0.3,
+			width=0.7,
+			ax=ax
+		)
 
-	# 5) Add a colorbar to interpret node_color → weight
-	vmin = min(weights.values())
-	vmax = max(weights.values())
-	sm = plt.cm.ScalarMappable(
-		cmap=cmap,
-		norm=plt.Normalize(vmin=vmin, vmax=vmax)
-	)
-	sm.set_array([])
-    
+		# Draw labels (only last‐move or "root")
+		if draw_labels:
+			nx.draw_networkx_labels(
+				G,
+				pos,
+				labels=labels,
+				font_size=8,
+				font_color="black",
+				verticalalignment="center",
+				horizontalalignment="center",
+				ax=ax
+			)
+
+		ax.set_title(f"Experiment {idx+1}")
+		ax.set_axis_off()
+
+		# Add a colorbar to each subplot (optional; comment out if cluttered)
+		sm = plt.cm.ScalarMappable(
+			cmap=cmap,
+			norm=plt.Normalize(vmin=global_vmin, vmax=global_vmax)
+		)
+		sm.set_array([])
+		cbar = fig.colorbar(sm, ax=ax, fraction=0.046, pad=0.04)
+		cbar.set_label("Stationary Probability", rotation=270, labelpad=15)
+
+	# Hide any unused subplots
+	for j in range(n_plots, len(axes)):
+		axes[j].set_visible(False)
+
+	plt.tight_layout()
+	plt.show()
 
 #white, black = fromAPI()
-games = fromLocalFile(max=50)
-pi = randomWalk(games, 10000)
-graph, labels = buildGraphFromCount(pi)
-print(graph)
-draw_chess_tree(graph, labels)
-plt.title("Chess‐Tree Stationary Distribution")
-plt.axis("off")
-plt.tight_layout()
-plt.show()
+games = fromLocalFile(max=10)
+
+graphs = []
+labels = []
+for i in range(9):
+	pi = randomWalk(games, 100000)
+	graph, label = buildGraphFromCount(pi)
+	graphs.append(graph)
+	labels.append(label)
+print(graphs)
+
+draw_chess_trees_grid(graphs, labels, ncols=3)
