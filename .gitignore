@@ -161,3 +161,4 @@ cython_debug/
 /stockfish
 apikey.txt
 /games
+game_index.pkl

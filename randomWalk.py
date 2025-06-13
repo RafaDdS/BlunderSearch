@@ -7,11 +7,14 @@ import networkx as nx
 from networkx import DiGraph
 from networkx.drawing.nx_agraph import graphviz_layout
 import matplotlib.pyplot as plt
-from collections import deque 
+from collections import deque
+import scipy as sp
+from scipy.special import kl_div
+import scipy.sparse
 
 def uci_to_algebraic(uci_move, board):
-    move = board.parse_uci(str(uci_move))
-    return board.san(move)
+	move = board.parse_uci(str(uci_move))
+	return board.san(move)
 
 def randomPathForward(games):
 	board = Board()
@@ -45,45 +48,7 @@ def getGamesWithMoves(games, moves):
 	
 	return current
 
-def randomWalk(games, n=pow(10, 5)):
-	board = Board()
-	current = games
-	moves = []
-	history = []
-	path = ""
-	pi = {}
-	for _ in range(n):
-		l = len(current)
-		p = 1/(l+1)
-
-		move = random.choice(current).next()
-		move = move.move if move else move
-		moves.append(move)
-
-		if (not move) or (moves and random.uniform(0, 1) < p):
-			if history:
-				moves.pop()
-				board.pop()
-				current = history.pop()
-				tmp = path.split()
-				tmp.pop()
-				path = " ".join(tmp)
-			continue
-		
-		path += f" {uci_to_algebraic(move, board)}"
-		path = path.strip()
-
-		pi[path] = pi.get(path, 0) + 1
-		
-		print(path)
-		
-		history.append(current)
-		current = [g.next() for g in current if g.next() and g.next().move == move]
-		board.push(move)
-
-	return pi
-
-def randomWalk2(games, n=pow(10, 5)):
+def randomWalk(games, n=pow(10, 5), horizonSize=1, shouldMoveStart=False):
 	# Setup variables
 	board = Board()
 	current = games
@@ -98,8 +63,8 @@ def randomWalk2(games, n=pow(10, 5)):
 		move = move.move if move else move
 		moves.append(move)
 
-		moveStart = not move or nGames==1
-		moveUp = moves and random.uniform(0, 1) < 1/(nGames+1)
+		moveStart = (not move or nGames==1) and shouldMoveStart
+		moveUp = (moves and random.uniform(0, 1) < 1/(nGames+1)) or (nGames<=horizonSize) or (not move and not shouldMoveStart)
 
 		if moveStart:
 			board = Board()
@@ -118,7 +83,10 @@ def randomWalk2(games, n=pow(10, 5)):
 				tmp.pop()
 				path = " ".join(tmp)
 			continue
-		
+
+		if not move:
+			raise "No move down, should have been handled before"
+
 		path += f" {uci_to_algebraic(move, board)}"
 		path = path.strip()
 
@@ -129,6 +97,128 @@ def randomWalk2(games, n=pow(10, 5)):
 		board.push(move)
 
 	return pi
+
+def randomWalk2(games, n=pow(10, 5), horizonSize=1, shouldMoveStart=False):
+	# Setup variables
+	board = Board()
+	current = games
+	moves = []
+	history = []
+	path = ""
+	pi = {}
+	for _ in range(n):
+		nGames = len(current)
+		choices = {m.next().uci():m.next() for m in current if m.next()}
+		move = random.choice(list(choices.values())).move
+		moves.append(move)
+
+		moveStart = (not move or nGames==1) and shouldMoveStart
+		moveUp = (moves and random.uniform(0, 1) < 1/2) or ((nGames<=horizonSize or not move) and not shouldMoveStart)
+
+		if moveStart:
+			board = Board()
+			current = games
+			moves = []
+			history = []
+			path = ""
+			continue
+
+		if moveUp:
+			if history:
+				moves.pop()
+				board.pop()
+				current = history.pop()
+				tmp = path.split()
+				tmp.pop()
+				path = " ".join(tmp)
+			continue
+
+		if not move:
+			raise "No move down, should have been handled before"
+
+		path += f" {uci_to_algebraic(move, board)}"
+		path = path.strip()
+
+		pi[path] = pi.get(path, 0) + 1
+		
+		history.append(current)
+		current = [g.next() for g in current if g.next() and g.next().move == move]
+		board.push(move)
+
+	return pi
+
+def build_tree_from_games(games, min_count, return_full = False):
+	"""
+	Construct a deterministic game‐tree from a list of PGN Game objects.
+
+	Parameters
+	----------
+	games : list of chess.pgn.Game
+		Each Game represents a complete, linear (no‐variation) game.
+	min_count : int
+		Only include a child node if at least `min_count` games follow that move.
+
+	Returns
+	-------
+	G : networkx.DiGraph
+		Directed graph where each node key is a full‐path string of SAN moves
+		(e.g. "", "e4", "e4 e5", ...). The root is "".
+	labels : dict
+		Mapping from each node key → string to display (the last move in SAN, or "root").
+	"""
+	G = nx.DiGraph()
+	G.add_node("root", weight=0.0, games=list(games))      # root (empty‐path)
+	labels = {"root": "root"}           # root’s displayed label
+
+	queue = deque()
+	# At depth 0, the “frontier” is just the list of full‐PGN Game objects
+	initial_frontier = list(games)
+	root_board = Board()
+	queue.append(("root", root_board, initial_frontier))
+
+	while queue:
+		path, board, frontier = queue.popleft()
+
+		# Group frontier‐games by their next UCI move
+		move_groups = {}  # { chess.Move : [list of PGN nodes at that next ply] }
+		for game_node in frontier:
+			# Each game_node is a chess.pgn.Game or a MoveNode
+			next_node = game_node.next()    # next_node is None if game is over
+			if not next_node:
+				continue
+			mv = next_node.move            # a chess.Move in UCI
+			move_groups.setdefault(mv, []).append(next_node)
+
+		# For each distinct next move, only branch if at least `min_count` games use it
+		for mv, next_nodes in move_groups.items():
+			# Convert UCI to SAN given the current board
+			alg = board.san(mv)
+
+			# Build the full‐path string
+			new_path = alg if path == "" else f"{path} {alg}"
+
+			# Add node and edge to G
+			is_exterior = (len(next_nodes) <= min_count)
+			depth = frontier[0].ply()+1
+			count = len(next_nodes)
+			G.add_node(new_path, weight=0.0, games=next_nodes, count=count, depth=depth, degree=len(next_nodes)+1, is_exterior=is_exterior)      # weight is a placeholder here
+			G.add_edge(path, new_path)
+
+			# Record the displayed label (just the last move)
+			labels[new_path] = alg
+
+			# Prepare the board copy for this branch
+			child_board = board.copy()
+			child_board.push(mv)
+
+			if not return_full and is_exterior:
+				continue
+
+			# The next frontier is exactly next_nodes (they already point to the next ply)
+			queue.append((new_path, child_board, next_nodes))
+
+	return G, labels
+
 
 def buildGraphFromCount(pi, limitDepth=-1):
     # Filter paths by depth limit if specified
@@ -277,16 +367,76 @@ def draw_chess_trees_grid(
 	plt.tight_layout()
 	plt.show()
 
-#white, black = fromAPI()
+def calculate_theoretical_stationary_distribution(G):
+	alpha = 1.0
+	beta = .0
+	lambd = 0.5
+	weights = nx.get_node_attributes(G, "weight")
+	depths = nx.get_node_attributes(G, "depth")
+	counts = nx.get_node_attributes(G, "count")
+	is_exteriors = nx.get_node_attributes(G, "is_exterior")
+	
+	tmp = []
+	Zint = 0
+	Zext = 0
+	for key in weights:
+		depth = depths.get(key, False)
+		count = counts.get(key, False)
+		is_exterior =is_exteriors.get(key, False)
+		if not depth:
+			continue
+
+		ad = alpha*depth
+		bc = beta*count
+		if is_exterior:
+			fn = 1 / (ad)
+			Zext += fn
+			tmp.append( (fn, key,  is_exterior) )
+		else:
+			fn = (ad + bc)
+			Zint += fn
+			tmp.append( (fn, key, is_exterior) )
+
+	out = {}
+	for fn, key, iss in tmp:
+		out[key] = ( lambd*fn*Zint if iss else (1-lambd)*fn*Zext)/(Zint*Zext)
+
+	nx.set_node_attributes(G, out, "weight")
+
+	out = [out[i] for i in out]
+	return out
+
+def calculate_MH_transitions(G:DiGraph, Pi):
+	A = nx.adjacency_matrix(G)
+	n = len(G.nodes())
+	sp.sparse.spdiags(1, 0, n, n)
+	return
+
+#white, black = fromAPI(max=20)
 games = fromLocalFile(max=1000)
+print("Games loaded")
+
+#process = [games, white, black]
 
 graphs = []
 labels = []
-for i in range(9):
-	pi = randomWalk2(games, 1000)
-	graph, label = buildGraphFromCount(pi, 3)
+
+
+graph, label = build_tree_from_games(games, 5)
+pi_th = calculate_theoretical_stationary_distribution(graph)
+graphs.append(graph)
+labels.append(label)
+print(graph)
+##print(pi_th)
+
+
+"""
+for i in range(3):
+	pi = randomWalk(games, 1000, horizonSize=1+2*i, shouldMoveStart=True)
+	graph, label = buildGraphFromCount(pi)
 	graphs.append(graph)
 	labels.append(label)
 	print(graph)
+"""
 
-draw_chess_trees_grid(graphs, labels, ncols=3)
+draw_chess_trees_grid(graphs, labels, draw_labels=False, ncols=1)
