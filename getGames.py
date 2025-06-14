@@ -24,7 +24,7 @@ except:
 def build_game_index():
 	"""
 	Scan file and return a list of byte-offsets for the start of every
-	game (i.e. each line beginning with '[').
+	game.
 	"""
 	with open(file) as f:
 		while True:

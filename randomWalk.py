@@ -11,6 +11,9 @@ from collections import deque
 import scipy as sp
 from scipy.special import kl_div
 import scipy.sparse
+import pickle
+import numpy as np
+import MCSampler
 
 def uci_to_algebraic(uci_move, board):
 	move = board.parse_uci(str(uci_move))
@@ -367,43 +370,47 @@ def draw_chess_trees_grid(
 	plt.tight_layout()
 	plt.show()
 
+mu = 10
+sigma = 4
+epsilon = 0.001
+
 def calculate_theoretical_stationary_distribution(G):
-	alpha = 1.0
-	beta = .0
-	lambd = 0.5
 	weights = nx.get_node_attributes(G, "weight")
 	depths = nx.get_node_attributes(G, "depth")
 	counts = nx.get_node_attributes(G, "count")
 	is_exteriors = nx.get_node_attributes(G, "is_exterior")
 	
 	tmp = []
-	Zint = 0
-	Zext = 0
+	Z = 0
 	for key in weights:
 		depth = depths.get(key, False)
 		count = counts.get(key, False)
 		is_exterior =is_exteriors.get(key, False)
+
 		if not depth:
 			continue
-
-		ad = alpha*depth
-		bc = beta*count
+		
 		if is_exterior:
-			fn = 1 / (ad)
-			Zext += fn
-			tmp.append( (fn, key,  is_exterior) )
+			fn = epsilon + 0.5 * math.erfc((depth - mu) / (math.sqrt(2) * sigma))
 		else:
-			fn = (ad + bc)
-			Zint += fn
-			tmp.append( (fn, key, is_exterior) )
+			fn = epsilon + (count/(2*math.pi*sigma*sigma)) * math.exp(-pow(depth-mu, 2)/(2*sigma*sigma))
+		
+		Z += fn
+		tmp.append( (fn, key) )
 
 	out = {}
-	for fn, key, iss in tmp:
-		out[key] = ( lambd*fn*Zint if iss else (1-lambd)*fn*Zext)/(Zint*Zext)
+	mini = 99999999999999999999
+	maxi = 0
+	for fn, key in tmp:
+		if fn < mini: mini = fn
+		if fn > maxi: maxi = fn
+		out[key] = fn/Z
+
+	print(f"min: {mini/Z}")
+	print(f"max: {maxi/Z}")
 
 	nx.set_node_attributes(G, out, "weight")
 
-	out = [out[i] for i in out]
 	return out
 
 def calculate_MH_transitions(G:DiGraph, Pi):
@@ -412,22 +419,118 @@ def calculate_MH_transitions(G:DiGraph, Pi):
 	sp.sparse.spdiags(1, 0, n, n)
 	return
 
+def saveGraph(graph):
+	with open("complete_graph.pkl", "wb") as f:
+		pickle.dump(graph, f)
+
+def loadGraph():
+	with open("complete_graph.pkl", "rb") as f:
+		graph = pickle.load(f)
+	return graph
+
+def compare_distribution(true_pi, pi, kl=False):
+	nodes = sorted(set(true_pi.keys()) | set(pi.keys()), key=lambda k: len(k.split()))
+
+	# 2. Build aligned probability vectors
+	P = np.array([true_pi.get(n, 0.0) for n in nodes], dtype=float)
+	Q = np.array([pi.get(n, 0.0) for n in nodes], dtype=float)
+
+	if kl:
+		return kl_div(P, Q)
+	else:
+		return np.abs(P - Q) * 0.5
+
+def plot_kl_div(kl_list: list, title: str = None, kl =False) -> None:
+	"""
+	Plot the element-wise max, min, and average across multiple KL-divergence arrays.
+
+	Parameters
+	----------
+	kl_list : list of np.ndarray
+		A list of 1D arrays (all the same length) containing element-wise KL divergences.
+	title : str, optional
+		An optional title for the plot.
+	"""
+	# Stack arrays (shape: num_runs x num_nodes)
+	stacked = np.vstack(kl_list)
+
+	# Compute statistics across runs
+	max_vals = np.max(stacked, axis=0)
+	min_vals = np.min(stacked, axis=0)
+	avg_vals = np.mean(stacked, axis=0)
+
+	# X-axis: node indices (no labels for individual nodes)
+	x = np.arange(stacked.shape[1])
+
+	# Plot
+	plt.figure()
+	plt.plot(x, max_vals, label='max')
+	plt.plot(x, avg_vals, label='average')
+	plt.plot(x, min_vals, label='min')
+	plt.xlabel('Node index')
+	plt.ylabel('KL divergence' if kl else 'Variation')
+	if title:
+		plt.title(title)
+	plt.legend()
+	plt.tight_layout()
+	plt.show()
+
+def simulate_pruned(graph, pi_n, N=100):
+	is_leaf = nx.get_node_attributes(graph, "is_exterior")
+	weights = nx.get_node_attributes(graph, "weight")
+	depths = nx.get_node_attributes(graph, "depth")
+	counts = nx.get_node_attributes(graph, "count")
+	gamess = nx.get_node_attributes(graph, "games")
+	leaf = {k:v for (k,v) in is_leaf.items() if v}
+
+	for key in leaf:
+		games = gamess[key]
+		count = counts[key]
+		depth = depths[key]
+		pi_n[key] = 0
+		weights[key] = pi_n[key]
+		
+	
+	nx.set_node_attributes(graph, weights, "weight")
+
+
+
 #white, black = fromAPI(max=20)
-games = fromLocalFile(max=1000)
+true_graph = loadGraph()
+true_pi = calculate_theoretical_stationary_distribution(true_graph)
+games = fromLocalFile(max=10000)
 print("Games loaded")
 
 #process = [games, white, black]
 
 graphs = []
 labels = []
+pis = []
 
+graph, label = build_tree_from_games(games, 1)
+#pi_n = calculate_theoretical_stationary_distribution(graph)
+#simulate_pruned(graph, pi_n)
 
-graph, label = build_tree_from_games(games, 5)
-pi_th = calculate_theoretical_stationary_distribution(graph)
-graphs.append(graph)
-labels.append(label)
+for i in range(5):
+	samples = dict()
+	Z = 100
+	for s in range(Z):
+		va = MCSampler.sample_variation(graph, mu, sigma, epsilon)
+		samples[va] = samples.get(va, 0) + 1
+	
+	pi_n = {key: val/Z for key ,val in samples.items()}
+	graphs.append(graph)
+	labels.append(label)
+	pis.append(pi_n)
+	print(i)
+
 print(graph)
-##print(pi_th)
+
+
+pis2 = [compare_distribution(true_pi, pi) for pi in pis]
+for pi in pis2:
+	print(sum(pi))
+plot_kl_div(pis2, "1000 Games Horizon-1, 1000 samples, 10 experimets")
 
 
 """
@@ -439,4 +542,4 @@ for i in range(3):
 	print(graph)
 """
 
-draw_chess_trees_grid(graphs, labels, draw_labels=False, ncols=1)
+#draw_chess_trees_grid(graphs, labels, draw_labels=False, ncols=1)
