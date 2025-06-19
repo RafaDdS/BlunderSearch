@@ -163,3 +163,4 @@ apikey.txt
 /games
 game_index.pkl
 *.pkl
+/results

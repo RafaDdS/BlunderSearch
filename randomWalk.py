@@ -494,7 +494,7 @@ def simulate_pruned(graph, pi_n, N=100):
 	nx.set_node_attributes(graph, weights, "weight")
 
 
-
+"""
 #white, black = fromAPI(max=20)
 true_graph = loadGraph()
 true_pi = calculate_theoretical_stationary_distribution(true_graph)
@@ -531,7 +531,7 @@ pis2 = [compare_distribution(true_pi, pi) for pi in pis]
 for pi in pis2:
 	print(sum(pi))
 plot_kl_div(pis2, "1000 Games Horizon-1, 1000 samples, 10 experimets")
-
+"""
 
 """
 for i in range(3):
